@@ -1,0 +1,14 @@
+[[nodes]]
+id = 1
+host = "127.0.0.1"
+port = 9001
+
+[[nodes]]
+id = 2
+host = "127.0.0.1"
+port = 9002
+
+[[nodes]]
+id = 3
+host = "127.0.0.1"
+port = 9003
