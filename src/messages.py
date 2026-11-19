@@ -22,3 +22,23 @@ def decode(raw: bytes | str):
     if cls is None:
         raise ValueError(f"unknown message type: {raw!r}")
     return cls(**data)
+
+@message
+@dataclass
+class Heartbeat:
+    sender_id: int
+
+@message
+@dataclass
+class Election:
+    sender_id: int
+
+@message
+@dataclass
+class Answer:
+    sender_id: int
+
+@message
+@dataclass
+class Coordinator:
+    sender_id: int
