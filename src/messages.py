@@ -6,6 +6,7 @@ rebuild.
 """
 import json
 from dataclasses import asdict, dataclass
+from typing import Any
 
 _REGISTRY: dict[str, type] = {}
 
@@ -45,6 +46,40 @@ class OrderedMessage:
     msg_id: str
     sender_id: int
     text: str
+
+
+# --- catch-up messages (replication.py) --- #
+
+@message
+@dataclass
+class StateRequest:
+    sender_id: int
+
+
+@message
+@dataclass
+class State:
+    sender_id: int
+    last_seq: int    # last seq with no gaps before it, -1 if the log is empty
+
+
+@message
+@dataclass
+class SyncRequest:
+    sender_id: int
+    from_seq: int
+
+
+@message
+@dataclass
+class SyncResponse:
+    sender_id: int
+    messages: list[OrderedMessage]
+
+    def __post_init__(self) -> None:
+        # JSON decoding gives plain dicts; turn them back into OrderedMessage.
+        raw: list[Any] = list(self.messages)
+        self.messages = [OrderedMessage(**m) if isinstance(m, dict) else m for m in raw]
 
 
 # --- election messages (election.py) --- #
