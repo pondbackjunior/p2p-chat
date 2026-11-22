@@ -1,8 +1,8 @@
 import asyncio
-import json
 import logging
-from .messages import encode, decode
-from .node import Node, Address
+
+from .messages import decode, encode
+from .node import Address, Node
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class Transport:
         log.info("listening on %s:%s", a.host, a.port)
         for pid, addr in self.node.peers.items():
             self._tasks.append(asyncio.create_task(self._dial_loop(pid, addr)))
-        self.node.send = self.send   # modules use node.send, never import transport
+        self.node.attach_sender(self.send)   # modules use node.send, never import transport
 
     async def stop(self) -> None:
         for t in self._tasks:
@@ -30,7 +30,7 @@ class Transport:
         for w in self._writers.values():
             w.close()
 
-    # --- inbound: read-only -------------------------------------------
+    # --- inbound: read-only --- #
     async def _on_inbound(self, reader, writer):
         peer = writer.get_extra_info("peername")
         log.info("inbound connection from %s", peer)
@@ -48,7 +48,7 @@ class Transport:
             writer.close()
             log.info("inbound connection from %s closed", peer)
 
-    # --- outbound: write-only, with reconnect ---------------------------
+    # --- outbound: write-only, with reconnect --- #
     async def _dial_loop(self, pid: int, addr: Address):
         delay = 0.5
         while True:
@@ -70,7 +70,7 @@ class Transport:
                 writer.close()
                 log.warning("lost connection to peer %s, retrying", pid)
 
-    # --- sending --------------------------------------------------------
+    # --- sending --- #
     async def send(self, peer_id: int, msg) -> bool:
         writer = self._writers.get(peer_id)
         if writer is None:

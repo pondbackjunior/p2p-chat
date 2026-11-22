@@ -1,24 +1,23 @@
 import argparse
 import asyncio
-import sys
 import logging
+import sys
 
 from .config import load_node
-from .log_setup import setup_logging
-from .messages import Submit
-from .transport import Transport
 from .election import Election
+from .log_setup import setup_logging
+from .replication import Replication
+from .transport import Transport
+
 
 async def run(node):
     log = logging.getLogger("main")
     transport = Transport(node)
     election = Election(node)
+    replication = Replication(node)
 
-    async def on_submit(msg: Submit):
-        print(f"[{msg.sender_id}] {msg.text}", flush=True)
-
-    node.register_handler(Submit, on_submit)
     election.register()
+    replication.register()
     await transport.start()
     await election.start()
     log.info("started; type a message and press Enter")
@@ -30,7 +29,7 @@ async def run(node):
             break
         text = line.strip()
         if text:
-            await transport.broadcast(Submit(sender_id=node.node_id, text=text))
+            await replication.submit(text)
     await election.stop()
     await transport.stop()
 

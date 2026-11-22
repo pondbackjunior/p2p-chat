@@ -17,7 +17,8 @@ import asyncio
 import logging
 import time
 
-from .messages import Heartbeat, Election as ElectionMsg, Answer, Coordinator
+from .messages import Answer, Coordinator, Heartbeat
+from .messages import Election as ElectionMsg
 from .node import Node
 
 log = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ class Election:
         if self._election_task:
             self._election_task.cancel()
 
-    # --- failure detection -----------------------------------------------
+    # --- failure detection --- #
     async def _heartbeat_loop(self) -> None:
         """Leader only: tell everyone we are alive."""
         while True:
@@ -80,10 +81,10 @@ class Election:
             if silent_for > self.leader_timeout:
                 log.warning("suspect leader %s (silent for %.1fs)",
                             self.node.leader_id, silent_for)
-                self.node.leader_id = None
+                self.node.set_leader(None)
                 self._begin_election()
 
-    # --- handlers --------------------------------------------------------
+    # --- handlers --- #
     async def _on_heartbeat(self, msg: Heartbeat) -> None:
         me = self.node.node_id
         if msg.sender_id < me:
@@ -93,7 +94,7 @@ class Election:
             return
         if self.node.leader_id != msg.sender_id:
             log.info("accepting node %s as leader (via heartbeat)", msg.sender_id)
-            self.node.leader_id = msg.sender_id
+            self.node.set_leader(msg.sender_id)
         self._last_heartbeat = time.monotonic()
 
     async def _on_election(self, msg: ElectionMsg) -> None:
@@ -114,11 +115,11 @@ class Election:
             self._begin_election()
             return
         log.info("node %s is the new leader", msg.sender_id)
-        self.node.leader_id = msg.sender_id
+        self.node.set_leader(msg.sender_id)
         self._last_heartbeat = time.monotonic()
         self._coordinator_seen.set()
 
-    # --- election procedure ----------------------------------------------
+    # --- election procedure --- #
     @property
     def _electing(self) -> bool:
         return self._election_task is not None and not self._election_task.done()
@@ -150,11 +151,11 @@ class Election:
             log.warning("no coordinator announced after answer, retrying election")
 
     async def _become_leader(self) -> None:
-        self.node.leader_id = self.node.node_id
+        self.node.set_leader(self.node.node_id)
         log.info("became leader")
         await self._send_all(Coordinator(sender_id=self.node.node_id))
 
-    # --- helpers ---------------------------------------------------------
+    # --- helpers --- #
     @staticmethod
     async def _wait(event: asyncio.Event, timeout: float) -> bool:
         try:
