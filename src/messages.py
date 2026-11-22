@@ -4,8 +4,8 @@ Every message is a dataclass. On the wire it is one line of JSON with an
 extra "type" field naming the class, so the receiver knows which class to
 rebuild.
 """
-from dataclasses import dataclass, asdict
 import json
+from dataclasses import asdict, dataclass
 
 _REGISTRY: dict[str, type] = {}
 

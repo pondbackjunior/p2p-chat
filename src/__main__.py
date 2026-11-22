@@ -1,13 +1,14 @@
 import argparse
 import asyncio
-import sys
 import logging
+import sys
 
 from .config import load_node
-from .log_setup import setup_logging
-from .transport import Transport
 from .election import Election
+from .log_setup import setup_logging
 from .replication import Replication
+from .transport import Transport
+
 
 async def run(node):
     log = logging.getLogger("main")

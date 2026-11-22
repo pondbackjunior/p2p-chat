@@ -1,8 +1,8 @@
 import asyncio
-import json
 import logging
-from .messages import encode, decode
-from .node import Node, Address
+
+from .messages import decode, encode
+from .node import Address, Node
 
 log = logging.getLogger(__name__)
 

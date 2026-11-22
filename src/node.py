@@ -1,7 +1,8 @@
 import asyncio
 import inspect
 import logging
-from typing import Any, Awaitable, Callable, NamedTuple, Optional, TypeVar
+from collections.abc import Awaitable, Callable
+from typing import Any, NamedTuple, Optional, TypeVar
 
 from .messages import OrderedMessage
 

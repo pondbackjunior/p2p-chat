@@ -17,7 +17,8 @@ import asyncio
 import logging
 import time
 
-from .messages import Heartbeat, Election as ElectionMsg, Answer, Coordinator
+from .messages import Answer, Coordinator, Heartbeat
+from .messages import Election as ElectionMsg
 from .node import Node
 
 log = logging.getLogger(__name__)

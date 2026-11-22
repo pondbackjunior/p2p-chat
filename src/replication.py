@@ -9,7 +9,7 @@ import asyncio
 import logging
 import uuid
 
-from .messages import Submit, OrderedMessage
+from .messages import OrderedMessage, Submit
 from .node import Node
 
 log = logging.getLogger(__name__)
