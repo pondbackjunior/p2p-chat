@@ -1,11 +1,16 @@
 import asyncio
 import inspect
 import logging
-from typing import Awaitable, Callable, NamedTuple, Optional
+from typing import Any, Awaitable, Callable, NamedTuple, Optional, TypeVar
+
+from .messages import OrderedMessage
 
 log = logging.getLogger(__name__)
 
-Handler = Callable[[object], Awaitable[None]]
+M = TypeVar("M")
+Handler = Callable[[Any], Awaitable[None]]
+LeaderListener = Callable[[int], None]
+Sender = Callable[[int, object], Awaitable[bool]]
 
 
 class Address(NamedTuple):
@@ -21,20 +26,20 @@ class Node:
         self.address = Address(host, port)
         self.peers: dict[int, Address] = dict(peers or {})
 
-        # Election state (used by election.py)
+        # Election state (used by election.py). Change it with set_leader().
         self.leader_id: Optional[int] = None
 
         # Replication state (used by replication.py)
-        self.next_seq: int = 0            # leader only: next sequence number to assign
-        self.pending: dict[int, object] = {}   # seq -> message awaiting commit
-        self.log: list[object] = []       # committed messages, in order
+        self.next_seq: int = 0                 # leader only: next sequence number to assign
+        self.pending: dict[int, OrderedMessage] = {}  # seq -> message that arrived early (hold-back)
+        self.log: list[OrderedMessage] = []           # delivered messages; log[i] has seq i
 
         # Wiring
         self._handlers: dict[type, Handler] = {}
-        # Set by transport.py. Signature: async send(peer_id, msg)
-        self.send: Optional[Callable[[int, object], Awaitable[None]]] = None
+        self._leader_listeners: list[LeaderListener] = []
+        self._sender: Optional[Sender] = None  # set by transport.py via attach_sender()
 
-    # --- convenience -----------------------------------------------------
+    # --- convenience --- #
     @property
     def is_leader(self) -> bool:
         return self.leader_id == self.node_id
@@ -46,8 +51,33 @@ class Node:
         """Peers with a higher ID than ours (the ones Bully contacts)."""
         return [pid for pid in self.other_ids() if pid > self.node_id]
 
-    # --- handler registry ------------------------------------------------
-    def register_handler(self, msg_type: type, handler: Handler) -> None:
+    # --- sending --- #
+    def attach_sender(self, sender: Sender) -> None:
+        """Called by transport.py so other modules can send through the node."""
+        self._sender = sender
+
+    async def send(self, peer_id: int, msg: object) -> bool:
+        """Send msg to one peer. Returns False if the peer is unreachable."""
+        if self._sender is None:
+            raise RuntimeError("transport not started: no sender attached")
+        return await self._sender(peer_id, msg)
+
+    # --- leader changes --- #
+    def add_leader_listener(self, listener: LeaderListener) -> None:
+        """Call listener(leader_id) whenever a new leader becomes known."""
+        self._leader_listeners.append(listener)
+
+    def set_leader(self, leader_id: Optional[int]) -> None:
+        """Record the current leader (None = unknown) and notify listeners."""
+        changed = leader_id != self.leader_id
+        self.leader_id = leader_id
+        if changed and leader_id is not None:
+            for listener in self._leader_listeners:
+                listener(leader_id)
+
+    # --- handler registry --- #
+    def register_handler(self, msg_type: type[M],
+                         handler: Callable[[M], Awaitable[None]]) -> None:
         if not inspect.iscoroutinefunction(handler):
             raise TypeError(f"handler for {msg_type.__name__} must be async")
         if msg_type in self._handlers:
