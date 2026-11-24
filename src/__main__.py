@@ -37,10 +37,11 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--config", default="cluster.toml")
     p.add_argument("--id", type=int, required=True)
+    p.add_argument("--quiet", action="store_true", help="Only show warnings and errors in the terminal")
     args = p.parse_args()
 
     node = load_node(args.config, args.id)
-    setup_logging(node.node_id)
+    setup_logging(node.node_id, quiet=args.quiet)
     try:
         asyncio.run(run(node))
     except KeyboardInterrupt:
