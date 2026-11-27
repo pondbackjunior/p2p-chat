@@ -6,18 +6,20 @@ import sys
 from .config import load_node
 from .election import Election
 from .log_setup import setup_logging
+from .history import HistoryStore
 from .replication import Replication
 from .transport import Transport
 
 
-async def run(node):
+async def run(node, history: HistoryStore):
     log = logging.getLogger("main")
     transport = Transport(node)
     election = Election(node)
-    replication = Replication(node)
+    replication = Replication(node, history=history)
 
     election.register()
     replication.register()
+    replication.restore()
     await transport.start()
     await election.start()
     log.info("started; type a message and press Enter")
@@ -38,12 +40,17 @@ def main():
     p.add_argument("--config", default="cluster.toml")
     p.add_argument("--id", type=int, required=True)
     p.add_argument("--quiet", action="store_true", help="Only show warnings and errors in the terminal")
+    p.add_argument("--history-dir", default="history",
+                   help="directory for the chat history files, one per node (default: history)")
+    p.add_argument("--fresh", action="store_true",
+                   help="delete this node's saved history and start with an empty one")
     args = p.parse_args()
 
     node = load_node(args.config, args.id)
     setup_logging(node.node_id, quiet=args.quiet)
+    history = HistoryStore.for_node(args.history_dir, node.node_id, fresh=args.fresh)
     try:
-        asyncio.run(run(node))
+        asyncio.run(run(node, history))
     except KeyboardInterrupt:
         pass
 

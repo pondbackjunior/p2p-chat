@@ -13,6 +13,11 @@ leader or notice a gap.
 Terms: Node.dispatch() drops messages from older terms before they get here.
 When the term goes up, held-back messages from the old leader are discarded
 too. Copies sent again later are stamped with the current term.
+
+History: if a HistoryStore is given, every delivered message is appended to
+the node's history file, and restore() loads that file at startup. Catch-up
+always asks for "everything after the last message in my log", so a restarted
+node only fetches what it missed while it was down.
 """
 import asyncio
 import logging
@@ -22,6 +27,7 @@ from collections.abc import Coroutine
 from dataclasses import replace
 from typing import Any
 
+from .history import HistoryStore
 from .messages import (
     OrderedMessage,
     State,
@@ -37,10 +43,12 @@ log = logging.getLogger(__name__)
 
 class Replication:
     def __init__(self, node: Node,
-                 state_timeout: float = 1.0,
-                 sync_timeout: float = 2.0,
-                 gap_retry: float = 2.0):
+                state_timeout: float = 1.0,
+                sync_timeout: float = 2.0,
+                gap_retry: float = 2.0,
+                history: HistoryStore | None = None):
         self.node = node
+        self.history = history               # where delivered messages are saved
         self.state_timeout = state_timeout   # how long a new leader waits for State replies
         self.sync_timeout = sync_timeout     # how long a new leader waits for missing messages
         self.gap_retry = gap_retry           # min seconds between identical gap requests
@@ -72,6 +80,19 @@ class Replication:
         self.node.register_handler(SyncResponse, self._on_sync_response)
         self.node.add_leader_listener(self._on_new_leader)
         self.node.add_term_listener(self._on_new_term)
+
+    def restore(self) -> None:
+        """Load the saved history into the log and show it. Call before transport.start()."""
+        if self.history is None:
+            return
+        if self.node.log:
+            raise RuntimeError("restore() must run before any message is delivered")
+        saved = self.history.load()
+        self.node.log.extend(saved)
+        for m in saved:
+            self._numbered.setdefault(m.msg_id, m)
+            self._show(m)
+        log.info("restored %d message(s) from %s", len(saved), self.history.path)
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Run coro in the background, keeping a reference so it isn't lost."""
@@ -264,6 +285,7 @@ class Replication:
         while len(self.node.log) in self.node.pending:
             m = self.node.pending.pop(len(self.node.log))
             self.node.log.append(m)
+            self._save(m)
             self._deliver(m)
 
         if self.node.pending:   # something is still waiting: there is a gap
@@ -280,6 +302,15 @@ class Replication:
         log.info("missing seq %s, asking leader %s", len(self.node.log), leader)
         self._ask_leader_for_missing(leader)
 
+    def _save(self, m: OrderedMessage) -> None:
+        """Append a delivered message to the history file."""
+        if self.history is None:
+            return
+        try:
+            self.history.append(m)
+        except OSError:
+            log.exception("could not save seq %s to %s", m.seq, self.history.path)
+
     def _deliver(self, m: OrderedMessage) -> None:
         self._unconfirmed.pop(m.msg_id, None)
         if m.msg_id in self._shown:
@@ -288,6 +319,15 @@ class Replication:
         self._shown.add(m.msg_id)
         log.info("delivered seq %s from node %s", m.seq, m.sender_id)
         print(f"[{m.seq}] node {m.sender_id}: {m.text}", flush=True)
+
+    def _show(self, m: OrderedMessage) -> bool:
+        """Print a message unless its msg_id was shown before. True if it was printed."""
+        if m.msg_id in self._shown:
+            log.info("seq %s repeats message %s, not showing it again", m.seq, m.msg_id)
+            return False
+        self._shown.add(m.msg_id)
+        print(f"[{m.seq}] node {m.sender_id}: {m.text}", flush=True)
+        return True
 
 
 async def _wait(event: asyncio.Event, timeout: float) -> bool:
