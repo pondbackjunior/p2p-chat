@@ -9,12 +9,17 @@ Catch-up: a new leader asks every node how far its log goes (StateRequest)
 and fetches what it is missing (SyncRequest) before numbering anything new.
 Other nodes ask the leader for missing messages when they learn of a new
 leader or notice a gap.
+
+Terms: Node.dispatch() drops messages from older terms before they get here.
+When the term goes up, held-back messages from the old leader are discarded
+too. Copies sent again later are stamped with the current term.
 """
 import asyncio
 import logging
 import time
 import uuid
 from collections.abc import Coroutine
+from dataclasses import replace
 from typing import Any
 
 from .messages import (
@@ -66,6 +71,7 @@ class Replication:
         self.node.register_handler(SyncRequest, self._on_sync_request)
         self.node.register_handler(SyncResponse, self._on_sync_response)
         self.node.add_leader_listener(self._on_new_leader)
+        self.node.add_term_listener(self._on_new_term)
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Run coro in the background, keeping a reference so it isn't lost."""
@@ -77,7 +83,8 @@ class Replication:
     # --- sending side --- #
     async def submit(self, text: str) -> None:
         """Called when the user types a message."""
-        msg = Submit(sender_id=self.node.node_id, msg_id=uuid.uuid4().hex, text=text)
+        msg = Submit(sender_id=self.node.node_id, term=self.node.term,
+                     msg_id=uuid.uuid4().hex, text=text)
         self._unconfirmed[msg.msg_id] = msg
         await self._send_to_leader(msg)
 
@@ -87,8 +94,18 @@ class Replication:
             log.info("no leader yet, holding message %s", msg.msg_id)
         elif leader == self.node.node_id:
             await self._sequence(msg)   # we are the leader: no network needed
-        elif not await self.node.send(leader, msg):
+        # The term may have moved on since the message was typed.
+        elif not await self.node.send(leader, replace(msg, term=self.node.term)):
             log.warning("could not reach leader %s, will resend %s later", leader, msg.msg_id)
+
+    def _on_new_term(self) -> None:
+        """Discard held-back messages: the old leader's numbering may be reused.
+
+        If the new leader has them, we get them again when we sync with it.
+        """
+        for m in self.node.pending.values():
+            self._numbered.pop(m.msg_id, None)
+        self.node.pending.clear()
 
     def _on_new_leader(self, leader_id: int) -> None:
         """Catch up with the new leader and resend anything unconfirmed."""
@@ -127,13 +144,14 @@ class Replication:
         if existing is not None:
             log.info("duplicate Submit %s, resending seq %s", msg.msg_id, existing.seq)
             if msg.sender_id != self.node.node_id:
-                await self.node.send(msg.sender_id, existing)
+                await self.node.send(msg.sender_id,
+                                     replace(existing, term=self.node.term))
             return
 
         seq = self._next_free_seq()
         self.node.next_seq = seq + 1
-        ordered = OrderedMessage(seq=seq, msg_id=msg.msg_id,
-                                 sender_id=msg.sender_id, text=msg.text)
+        ordered = OrderedMessage(seq=seq, msg_id=msg.msg_id, sender_id=msg.sender_id,
+                                 text=msg.text, term=self.node.term)
         log.info("assigned seq %s to %s from node %s", seq, msg.msg_id, msg.sender_id)
 
         self._accept(ordered)   # deliver locally first
@@ -158,22 +176,25 @@ class Replication:
                 log.info("missing seq %s..%s, fetching from node %s",
                          own_last + 1, best_last, best_id)
                 self._sync_in.clear()
-                request = SyncRequest(sender_id=self.node.node_id, from_seq=own_last + 1)
+                request = SyncRequest(sender_id=self.node.node_id, term=self.node.term,
+                                      from_seq=own_last + 1)
                 if await self.node.send(best_id, request):
                     await _wait(self._sync_in, self.sync_timeout)
             log.info("caught up at seq %s, ready to number messages", len(self.node.log) - 1)
         finally:
-            self._ready.set()
-            waiting, self._waiting = self._waiting, []
-            for msg in waiting:
-                if self.node.is_leader:   # if we lost leadership, senders resend anyway
-                    await self._sequence(msg)
+            # A cancelled catch-up must not release submits held by its replacement.
+            if asyncio.current_task() is self._catch_up_task:
+                self._ready.set()
+                waiting, self._waiting = self._waiting, []
+                for msg in waiting:
+                    if self.node.is_leader:   # if we lost leadership, senders resend anyway
+                        await self._sequence(msg)
 
     async def _collect_states(self) -> tuple[int, int]:
         """Ask every peer how far its log goes. Returns (node id, last seq) of the furthest."""
         self._states.clear()
         self._states_in.clear()
-        request = StateRequest(sender_id=self.node.node_id)
+        request = StateRequest(sender_id=self.node.node_id, term=self.node.term)
         sent = await asyncio.gather(*(self.node.send(pid, request) for pid in self.node.peers))
         self._expected_states = sum(sent)   # only count peers we could reach
         if len(self._states) < self._expected_states:
@@ -192,7 +213,8 @@ class Replication:
 
     # --- every node: answering catch-up requests --- #
     async def _on_state_request(self, msg: StateRequest) -> None:
-        reply = State(sender_id=self.node.node_id, last_seq=len(self.node.log) - 1)
+        reply = State(sender_id=self.node.node_id, term=self.node.term,
+                      last_seq=len(self.node.log) - 1)
         await self.node.send(msg.sender_id, reply)
 
     async def _on_sync_request(self, msg: SyncRequest) -> None:
@@ -206,7 +228,8 @@ class Replication:
         log.info("sending %d message(s) from seq %s to node %s",
                  len(missing), msg.from_seq, msg.sender_id)
         await self.node.send(msg.sender_id,
-                             SyncResponse(sender_id=self.node.node_id, messages=missing))
+                             SyncResponse(sender_id=self.node.node_id, term=self.node.term,
+                                          messages=missing))
 
     async def _on_sync_response(self, msg: SyncResponse) -> None:
         log.info("received %d message(s) from node %s", len(msg.messages), msg.sender_id)
@@ -218,7 +241,8 @@ class Replication:
         """Ask the leader for every message after the last one we have."""
         from_seq = len(self.node.log)
         self._last_gap_request = (from_seq, time.monotonic())
-        request = SyncRequest(sender_id=self.node.node_id, from_seq=from_seq)
+        request = SyncRequest(sender_id=self.node.node_id, term=self.node.term,
+                              from_seq=from_seq)
         self._spawn(self._send_ignoring_result(leader_id, request))
 
     async def _send_ignoring_result(self, peer_id: int, msg: object) -> None:

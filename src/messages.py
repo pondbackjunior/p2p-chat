@@ -3,6 +3,9 @@
 Every message is a dataclass. On the wire it is one line of JSON with an
 extra "type" field naming the class, so the receiver knows which class to
 rebuild.
+
+Every message also carries the sender's current `term`. Node.dispatch() uses
+it to ignore messages from outdated leaders (see node.py).
 """
 import json
 from dataclasses import asdict, dataclass
@@ -35,6 +38,7 @@ def decode(raw: bytes | str):
 @dataclass
 class Submit:
     sender_id: int
+    term: int
     msg_id: str      # unique per message, used to drop duplicates
     text: str
 
@@ -44,8 +48,9 @@ class Submit:
 class OrderedMessage:
     seq: int         # global sequence number, starting from 0
     msg_id: str
-    sender_id: int
+    sender_id: int   # the node that wrote the message, not the leader
     text: str
+    term: int        # term of the leader that sent this copy
 
 
 # --- catch-up messages (replication.py) --- #
@@ -54,12 +59,14 @@ class OrderedMessage:
 @dataclass
 class StateRequest:
     sender_id: int
+    term: int
 
 
 @message
 @dataclass
 class State:
     sender_id: int
+    term: int
     last_seq: int    # last seq with no gaps before it, -1 if the log is empty
 
 
@@ -67,6 +74,7 @@ class State:
 @dataclass
 class SyncRequest:
     sender_id: int
+    term: int
     from_seq: int
 
 
@@ -74,6 +82,7 @@ class SyncRequest:
 @dataclass
 class SyncResponse:
     sender_id: int
+    term: int
     messages: list[OrderedMessage]
 
     def __post_init__(self) -> None:
@@ -88,21 +97,41 @@ class SyncResponse:
 @dataclass
 class Heartbeat:
     sender_id: int
+    term: int
+
+
+@message
+@dataclass
+class HeartbeatReply:
+    """Follower -> leader: "I am alive"."""
+    sender_id: int
+    term: int
+
+
+@message
+@dataclass
+class StaleTerm:
+    """Tells a node that used an old term what the current term is."""
+    sender_id: int
+    term: int
 
 
 @message
 @dataclass
 class Election:
     sender_id: int
+    term: int
 
 
 @message
 @dataclass
 class Answer:
     sender_id: int
+    term: int
 
 
 @message
 @dataclass
 class Coordinator:
     sender_id: int
+    term: int

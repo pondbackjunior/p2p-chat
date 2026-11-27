@@ -4,13 +4,14 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, NamedTuple, Optional, TypeVar
 
-from .messages import OrderedMessage
+from .messages import Coordinator, Election, Heartbeat, OrderedMessage, StaleTerm
 
 log = logging.getLogger(__name__)
 
 M = TypeVar("M")
 Handler = Callable[[Any], Awaitable[None]]
 LeaderListener = Callable[[int], None]
+TermListener = Callable[[], None]
 Sender = Callable[[int, object], Awaitable[bool]]
 
 
@@ -27,8 +28,10 @@ class Node:
         self.address = Address(host, port)
         self.peers: dict[int, Address] = dict(peers or {})
 
-        # Election state (used by election.py). Change it with set_leader().
+        # Election state (used by election.py).
+        # Change these with set_leader() and advance_term().
         self.leader_id: Optional[int] = None
+        self.term: int = 0   # goes up each time a new leader takes over
 
         # Replication state (used by replication.py)
         self.next_seq: int = 0                 # leader only: next sequence number to assign
@@ -38,6 +41,7 @@ class Node:
         # Wiring
         self._handlers: dict[type, Handler] = {}
         self._leader_listeners: list[LeaderListener] = []
+        self._term_listeners: list[TermListener] = []
         self._sender: Optional[Sender] = None  # set by transport.py via attach_sender()
 
     # --- convenience --- #
@@ -63,6 +67,21 @@ class Node:
             raise RuntimeError("transport not started: no sender attached")
         return await self._sender(peer_id, msg)
 
+    # --- term changes --- #
+    def add_term_listener(self, listener: TermListener) -> None:
+        """Call listener() whenever the term goes up."""
+        self._term_listeners.append(listener)
+
+    def advance_term(self, term: int) -> None:
+        """Move to a higher term. The leader of the old term no longer counts."""
+        if term <= self.term:
+            return
+        log.info("term %s -> %s", self.term, term)
+        self.term = term
+        self.set_leader(None)   # unknown until the new term's leader shows up
+        for listener in self._term_listeners:
+            listener()
+
     # --- leader changes --- #
     def add_leader_listener(self, listener: LeaderListener) -> None:
         """Call listener(leader_id) whenever a new leader becomes known."""
@@ -87,6 +106,18 @@ class Node:
         log.debug("registered handler for %s", msg_type.__name__)
 
     async def dispatch(self, msg: object) -> None:
+        """Check the message's term, then pass it to its handler."""
+        if msg.term < self.term:
+            log.info("ignoring %s from old term %s (current term %s)",
+                     type(msg).__name__, msg.term, self.term)
+            # Tell an outdated leader or candidate, so it can catch up. Only
+            # these types: their sender_id is the node that used the old term.
+            if isinstance(msg, (Heartbeat, Election, Coordinator)):
+                await self.send(msg.sender_id,
+                                StaleTerm(sender_id=self.node_id, term=self.term))
+            return
+        self.advance_term(msg.term)   # does nothing unless the term is higher
+
         handler = self._handlers.get(type(msg))
         if handler is None:
             log.warning("no handler for %s", type(msg).__name__)
